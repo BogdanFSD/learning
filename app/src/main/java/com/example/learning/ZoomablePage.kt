@@ -34,15 +34,15 @@ fun ZoomablePage(
 ) {
     /* ─── state ─── */
     var scale by remember { mutableStateOf(1f) }
-    var offset by remember { mutableStateOf(Offset.Zero) }
-    var canvasSize by remember { mutableStateOf(IntSize(0, 0)) }
+    var offset by remember { mutableStateOf(Offset.Zero) }          // user pan relative to centred page
+    var canvasSize by remember { mutableStateOf(IntSize.Zero) }
 
     val ptPerPx = 72f / 96f
     val pageH by remember(docPtr) { mutableStateOf(PdfUtils.getPageSize(docPtr, 0)[1]) }
 
-    /* inverse matrix (no centering translation) */
+    /* inverse matrix that mirrors the graphicsLayer transform */
     val invViewMatrix by remember {
-        derivedStateOf { viewToPdfMatrix(scale, offset) }
+        derivedStateOf { viewToPdfMatrix(scale, offset, canvasSize, bitmap) }
     }
 
     val quads = remember { mutableStateListOf<RectF>() }
@@ -57,27 +57,19 @@ fun ZoomablePage(
             val sx = canvasSize.width.toFloat() / bitmap.width
             val sy = canvasSize.height.toFloat() / bitmap.height
             val fit = min(sx, sy)
-            val safe = min(fit, 1f) * 0.95f           // never enlarge, leave margin
-            scale = safe
-
-            val contentW = bitmap.width * safe
-            val contentH = bitmap.height * safe
-            offset = Offset(
-                (canvasSize.width - contentW) / 2f,
-                (canvasSize.height - contentH) / 2f
-            )
+            scale = min(fit, 1f) * 0.95f               // margin, never enlarge
+            offset = Offset.Zero                       // centre handled by graphicsLayer
             Log.d(LOG, "Fit scale=$scale offset=$offset")
         }
     }
 
-    /* ─── pinch/pan ─── */
+    /* ─── pinch / pan ─── */
     val transformableState = rememberTransformableState { zoom, pan, _ ->
         val newScale = (scale * zoom).coerceIn(1f, 8f)
         val contentW = bitmap.width * newScale
         val contentH = bitmap.height * newScale
         val boundX = max(0f, (contentW - canvasSize.width) / 2f)
         val boundY = max(0f, (contentH - canvasSize.height) / 2f)
-
         val newOffset = offset + pan
         scale = newScale
         offset = Offset(
@@ -93,12 +85,13 @@ fun ZoomablePage(
         modifier = Modifier
             .fillMaxSize()
             .onSizeChanged { canvasSize = it }
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-                translationX = offset.x
-                translationY = offset.y
-            }
+//            .graphicsLayer {
+//                scaleX = scale
+//                scaleY = scale
+//                val centre = centreOffset(scale, canvasSize, bitmap)
+//                translationX = offset.x + centre.x
+//                translationY = offset.y + centre.y
+//            }
             .transformable(state = transformableState)
             .pointerInput(docPtr) {
                 detectTapGestures(onLongPress = { downPos ->
@@ -149,17 +142,32 @@ fun ZoomablePage(
                 })
             }
     ) {
-        drawIntoCanvas { it.nativeCanvas.drawBitmap(bitmap, 0f, 0f, null) }
+        drawIntoCanvas {
+            it.nativeCanvas.save()
+            val c = centreOffset(scale, canvasSize, bitmap)
+            it.nativeCanvas.translate(offset.x + c.x, offset.y + c.y)
+            it.nativeCanvas.scale(scale, scale)
+            it.nativeCanvas.drawBitmap(bitmap, 0f, 0f, null)
+            it.nativeCanvas.restore()
+        }
         quads.forEach { r -> drawRect(Color.Yellow.copy(alpha = 0.35f), Offset(r.left, r.top), androidx.compose.ui.geometry.Size(r.width(), r.height())) }
         probes.forEach { drawCircle(Color.Red.copy(alpha = 0.5f), 6f, it) }
     }
 }
 
-/* simple inverse based on user pan/zoom only */
-private fun viewToPdfMatrix(scale: Float, offset: Offset): Matrix {
+/* centring offset for current scale */
+private fun centreOffset(scale: Float, canvas: IntSize, bm: android.graphics.Bitmap): Offset =
+    Offset(
+        (canvas.width - bm.width * scale) / 2f,
+        (canvas.height - bm.height * scale) / 2f
+    )
+
+/* inverse matrix mirroring graphicsLayer */
+private fun viewToPdfMatrix(scale: Float, offset: Offset, canvas: IntSize, bm: android.graphics.Bitmap): Matrix {
     val m = Matrix()
     m.postScale(scale, scale)
-    m.postTranslate(offset.x, offset.y)
+    val c = centreOffset(scale, canvas, bm)
+    m.postTranslate(offset.x + c.x, offset.y + c.y)
     m.invert(m)
     return m
 }
